@@ -1,0 +1,28 @@
+# Secrets
+.env
+
+# Audit logs (may contain sensitive network data)
+audit_log.jsonl
+
+# pcap files (often sensitive)
+*.pcap
+*.pcapng
+*.cap
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
