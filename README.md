@@ -1,6 +1,6 @@
 # SOC Triage Assistant
 
-An LLM-augmented triage tool for junior SOC analysts. Upload a flagged `.pcap` file, get an AI-generated triage report with risk rating and actionable indicators, then record your disposition — all in a browser UI.
+An LLM-augmented triage tool for junior SOC analysts. Upload a flagged `.pcap` file, get an AI-generated triage report with risk rating and actionable indicators, then record your disposition - all in a browser UI.
 
 ---
 
@@ -9,10 +9,10 @@ An LLM-augmented triage tool for junior SOC analysts. Upload a flagged `.pcap` f
 When an IDS flags a packet capture, a junior analyst typically opens it in Wireshark, manually sifts through traffic, and decides whether to escalate, investigate, or close. This is slow and error-prone. SOC Triage Assistant automates the feature extraction and synthesis step:
 
 1. **Upload** a `.pcap` or `.pcapng` file
-2. **Extract** structured network metadata (DNS queries, HTTP requests, TLS SNI, connections, payload entropy, etc.) — all locally, no raw bytes sent anywhere
+2. **Extract** structured network metadata (DNS queries, HTTP requests, TLS SNI, connections, payload entropy, etc.) - all locally, no raw bytes sent anywhere
 3. **Enrich** suspicious IPs and domains via live reputation APIs (optional)
-4. **Analyze** with Claude — produces a plain-language triage report with flagged indicators, a risk level, and recommended next steps
-5. **Decide** — select Escalate / Investigate / Close; the decision is audit-logged
+4. **Analyze** with Claude - produces a plain-language triage report with flagged indicators, a risk level, and recommended next steps
+5. **Decide** - select Escalate / Investigate / Close; the decision is audit-logged
 
 A **baseline toggle** switches to a features-only view (no LLM), so you can compare what the AI adds vs. raw extracted data alone.
 
@@ -27,7 +27,7 @@ The system is deliberately layered to separate deterministic processing from pro
     │
     ▼
 ┌─────────────────────────────────────────────────────┐
-│  Layer 1 — Feature Extraction  (extractor.py)       │
+│  Layer 1 - Feature Extraction  (extractor.py)       │
 │  scapy parses the pcap locally into structured JSON  │
 │  Protocol counts, connections, DNS, HTTP, TLS SNI,   │
 │  payload entropy, packet size stats, top talkers     │
@@ -35,7 +35,7 @@ The system is deliberately layered to separate deterministic processing from pro
                     │ structured JSON (no raw bytes)
                     ▼
 ┌─────────────────────────────────────────────────────┐
-│  Layer 2 — LLM Analysis + Tool Use  (analyzer.py)   │
+│  Layer 2 - LLM Analysis + Tool Use  (analyzer.py)   │
 │  Claude (claude-opus-4-6) receives the JSON features │
 │  and runs an agentic loop:                           │
 │    • Calls lookup_ip_reputation for suspicious IPs   │
@@ -47,7 +47,7 @@ The system is deliberately layered to separate deterministic processing from pro
                     │ structured triage report
                     ▼
 ┌─────────────────────────────────────────────────────┐
-│  Layer 3 — Presentation  (app.py)                   │
+│  Layer 3 - Presentation  (app.py)                   │
 │  Streamlit UI displays:                              │
 │    • Traffic summary, risk level, confidence         │
 │    • Flagged indicators with evidence                │
@@ -111,14 +111,14 @@ Edit `.env`:
 # Required
 ANTHROPIC_API_KEY=your_anthropic_api_key_here
 
-# Optional — enables live IP reputation via AbuseIPDB (free tier: 1000 checks/day)
+# Optional - enables live IP reputation via AbuseIPDB (free tier: 1000 checks/day)
 ABUSEIPDB_API_KEY=
 
-# Optional — enables domain reputation via VirusTotal (free tier: 4 req/min)
+# Optional - enables domain reputation via VirusTotal (free tier: 4 req/min)
 VIRUSTOTAL_API_KEY=
 ```
 
-Without the optional keys the app still works — IP lookups fall back to free geolocation (ipapi.co) and domain lookups fall back to plain DNS resolution.
+Without the optional keys the app still works - IP lookups fall back to free geolocation (ipapi.co) and domain lookups fall back to plain DNS resolution.
 
 ### 5. Run
 
