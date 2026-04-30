@@ -1,6 +1,6 @@
 # SOC Triage Assistant
 
-An triage tool for junior SOC analysts. Upload a flagged `.pcap` file, get an AI-generated triage report with risk rating and actionable indicators, then record your disposition - all in a browser UI.
+An triage tool for junior SOC analysts. Upload a flagged `.pcap` file, get a triage report automatically generated with risk rating and actionable indicators, then record your disposition - all in a browser UI.
 
 ---
 
