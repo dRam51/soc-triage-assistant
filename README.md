@@ -259,6 +259,119 @@ The model is instructed to respond with `insufficient_data=true` when:
 
 ---
 
+## Evaluation: SOC Triage Assistant vs. Human Analyst
+
+This section compares the SOC Triage Assistant against a real-world traffic analysis exercise from [malware-traffic-analysis.net](https://www.malware-traffic-analysis.net/2026/02/28/index.html). The answers file represents the human analyst baseline: what an experienced analyst would find by manually working through the pcap in Wireshark. The SOC Triage Assistant output represents the GenAI approach.
+
+**Test case:** `2026-02-28-traffic-analysis-exercise.pcap` (6.6 MB, 15,512 packets) — a live NetSupport Manager RAT infection with active C2 communication.
+
+---
+
+### What the human analyst does (baseline)
+
+The human analyst opens the pcap in Wireshark and applies a series of manual filters to answer the incident report questions:
+
+1. Filter on the C2 IP (`45.131.214.85`) to identify the internal host communicating with it
+2. Filter `nbns` to find the Windows hostname and MAC address from NetBIOS Name Service frames
+3. Filter `kerberos.CNameString` and inspect frame details to find the Windows user account name
+4. Use Edit > Find Packet to search packet details for the full name string
+
+This requires knowledge of which Wireshark filters to apply, how to navigate frame details, and familiarity with Windows authentication protocols. For a junior analyst, each step is a potential blocker.
+
+---
+
+### What the SOC Triage Assistant found
+
+The assistant processed the same pcap in under 60 seconds and produced the following without any manual filtering:
+
+| Finding | Human Analyst | SOC Triage Assistant |
+|---|---|---|
+| Infected host IP | 10.2.28.88 | 10.2.28.88 |
+| C2 server | 45.131.214.85:443 | 45.131.214.85:443 |
+| Malware family | NetSupport Manager RAT | NetSupport Manager RAT |
+| C2 URI pattern | (manual Wireshark inspection) | `/fakeurl.htm` flagged as known RAT indicator |
+| Suspicious domain | (not in scope for exercise) | `vadusa.xyz` flagged with .xyz TLD analysis |
+| Port evasion technique | (not flagged) | HTTP over port 443 flagged as deliberate evasion |
+| Encrypted C2 payloads | (not analyzed) | CMD=ENCD payloads with entropy 7.97 flagged |
+| SMB lateral movement risk | (not in scope) | Flagged 909-packet SMB flow to domain controller |
+| Risk rating | (Escalate - implied) | High, Confidence: High |
+| Recommended disposition | Escalate | Escalate (7 specific action steps) |
+| Windows hostname | DESKTOP-TEYQ2NR | Not extracted |
+| MAC address | 00:19:d1:b2:4d:ad | Not extracted |
+| Windows user account | brolf | Not extracted |
+| Full user name | Becka Rolf | Not extracted |
+
+---
+
+### Indicator accuracy
+
+The assistant flagged 7 indicators. All 7 were directly supported by extracted features — no hallucinations.
+
+| Indicator | Severity | Grounded in extracted data | Correct |
+|---|---|---|---|
+| NetSupport Manager RAT C2 beaconing | High | 40+ POST requests to `/fakeurl.htm` with UA `NetSupport Manager/1.3` | Yes |
+| Suspicious domain `vadusa.xyz` resolves to C2 IP | High | DNS query present; domain resolved to 45.131.214.85 | Yes |
+| Suspicious URI `/fakeurl.htm` | High | Present in all POST requests | Yes |
+| HTTP over port 443 (non-TLS) | Medium | Plaintext HTTP to port 443 confirmed | Yes |
+| Encoded/encrypted C2 payloads | High | CMD=ENCD, ES=1, binary DATA fields visible | Yes |
+| Heavy SMB traffic to domain controller | Medium | 909 packets across 3 sessions to 10.2.28.2:445 | Yes |
+| NetBIOS broadcast traffic | Low | 430 UDP packets to 10.2.28.255:138 | Yes |
+
+**Hallucination rate: 0%** - Every indicator was traceable to specific values in the extracted features panel.
+
+---
+
+### Where the assistant added value beyond the exercise
+
+The exercise asked the analyst to identify the victim machine. The assistant went further:
+
+- **Threat identification in plain language:** Named the specific RAT family, its C2 protocol mechanics (CMD=POLL, CMD=ENCD), and the known `/fakeurl.htm` indicator without any prompt engineering for this specific threat
+- **Evasion technique detection:** Identified that the attacker used plaintext HTTP on port 443 to bypass port-based filtering — a detail not surfaced by the exercise answer key
+- **Lateral movement flag:** Detected 909 packets of SMB traffic to the domain controller and correctly noted this as a potential post-compromise staging signal
+- **Actionable next steps:** Produced 7 specific remediation steps (isolate host, block IP/domain, forensic analysis, SMB session review, SIEM/EDR search, delivery vector review, credential audit) compared to the exercise's focus on victim identification only
+- **Entropy analysis:** Quantified payload entropy at 7.97, providing an objective signal for encryption consistent with RAT command channels
+
+---
+
+### Where the assistant fell short
+
+The assistant's extractor does not currently parse:
+
+- **NBNS (NetBIOS Name Service):** Required to extract the Windows hostname (`DESKTOP-TEYQ2NR`) from broadcast frames
+- **Kerberos:** Required to extract the Windows user account (`brolf`) from `CNameString` fields
+- **ARP/DHCP:** Required to extract the MAC address (`00:19:d1:b2:4d:ad`)
+
+These are critical for incident response (you need to know which physical machine to isolate and which user to notify). The human analyst retrieves all three in under 5 minutes using targeted Wireshark filters. The assistant cannot currently surface them because the extractor does not parse these protocol layers.
+
+This represents the clearest gap between the GenAI and human approaches on this test case.
+
+---
+
+### Speed and workflow comparison
+
+| Step | Human Analyst (Wireshark) | SOC Triage Assistant |
+|---|---|---|
+| Open and load pcap | ~30 seconds | ~5 seconds (upload) |
+| Identify C2 traffic | Filter by IP, inspect manually (~5-10 min) | Automatic, in triage report |
+| Identify RAT family | Recognize User-Agent string (~2-5 min) | Named in traffic summary |
+| Find hostname | Apply `nbns` filter, inspect frame (~2 min) | Not available |
+| Find user account | Apply `kerberos.CNameString` filter (~3 min) | Not available |
+| Find full name | Use Find Packet, search string (~2 min) | Not available |
+| Write incident summary | Manual writeup (~15-30 min) | Auto-generated in structured format |
+| Determine disposition | Based on full analysis | Risk: High, Confidence: High in seconds |
+
+For the threat identification portion of triage, the assistant is significantly faster. For victim attribution (the specific focus of this exercise), the human analyst with Wireshark is more capable due to the current extractor's limitations.
+
+---
+
+### Overall assessment
+
+The SOC Triage Assistant correctly identified the core threat (NetSupport Manager RAT, C2 server, infection confirmed) and recommended the correct disposition (Escalate) with zero hallucinations. It surfaced indicators and context that go beyond what the exercise answer key covers, including evasion techniques, lateral movement signals, and specific remediation steps.
+
+The primary gap is victim attribution: hostname, MAC address, and user account extraction requires NBNS and Kerberos parsing that is not yet implemented in the feature extractor. Adding these protocol layers to `extractor.py` would close the most significant difference between the GenAI and human analyst outputs on incident response tasks.
+
+---
+
 ## Dependencies
 
 | Package | Purpose |
