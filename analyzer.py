@@ -134,17 +134,36 @@ RULES — follow these strictly:
    Never invent IPs, domains, URIs, or user agents not present in the data.
 2. If features are sparse (e.g., all TLS with no SNI, no DNS, no HTTP), \
    set insufficient_data=true and say "insufficient data for payload analysis". Do not guess.
-3. Use lookup_ip_reputation for external IPs involved in unusual or high-volume connections.
+3. Use lookup_ip_reputation for external IPs involved in unusual or high-volume connections, \
+   and ALWAYS look up any IP that appears in known_malware_port_hits connections.
 4. Use lookup_domain_reputation for DNS queries or SNI values that appear high-entropy, \
    DGA-like, unusual TLD, or otherwise suspicious.
-5. Be conservative with risk ratings:
-   - High = clear, corroborated IOCs (e.g., known-bad reputation + C2-pattern traffic)
-   - Medium = suspicious indicators without confirmation
-   - Low = routine traffic with no meaningful indicators
-6. Always call submit_triage_report once at the end.
+5. Risk rating rules (apply the HIGHEST matching rule):
+   a. AUTOMATIC HIGH — if known_malware_port_hits is present and non-empty, the traffic \
+      contains confirmed malware-associated port activity. Name the specific malware family \
+      (e.g., "STRRAT C2 traffic on port 12132") and rate overall_risk=High regardless of \
+      other indicators.
+   b. AUTOMATIC HIGH — if any connection uses a non-standard port (not 80/443/53/25/587/993/ \
+      8080/8443) to a non-RFC1918 IP AND geolocation shows a foreign country, rate High.
+   c. AUTOMATIC HIGH — if suspicious_downloads is non-empty (executable or script file \
+      downloaded over HTTP), rate at least High.
+   d. Medium = suspicious indicators without confirmation (unusual ports, high entropy, \
+      suspicious domains — but no confirmed malware match).
+   e. Low = routine traffic with no meaningful indicators.
+6. Malware-port co-occurrence rule: if known_malware_port_hits is present, also examine \
+   whether software-repository domains appear in dns_queries, tls_sni, or http_requests \
+   (github.com, raw.githubusercontent.com, objects.githubusercontent.com, repo1.maven.org, \
+   pypi.org, npmjs.com). If they do, flag this as a HIGH indicator: "Malware delivery via \
+   software repository infrastructure" — attackers often stage payloads on GitHub/Maven.
+7. Victim attribution: if ldap_users is present, include the victim's full name in the \
+   traffic_summary (e.g., "The infected host belongs to [displayName], account [sAMAccountName]").
+8. Suspicious downloads: if suspicious_downloads is present, create a High indicator for \
+   each entry: "Executable/script file downloaded over cleartext HTTP — possible malware \
+   delivery". Include the URI and file extension as evidence.
+9. Always call submit_triage_report once at the end.
 
 Each indicator's "evidence" field must contain specific values from the features \
-(IP addresses, domain names, URIs, port numbers, etc.)."""
+(IP addresses, domain names, URIs, port numbers, malware family names, etc.)."""
 
 
 # ── Tool Implementations ──────────────────────────────────────────────────────

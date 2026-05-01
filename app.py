@@ -216,11 +216,34 @@ if mode == "🤖 AI-Augmented Analysis":
 st.subheader("Extracted Features")
 st.caption("Raw pcap metadata - use this to cross-reference AI findings.")
 
+# ── Malware Port Hits (auto-detected C2 ports) ───────────────────────────────
+malware_hits = features.get("known_malware_port_hits", [])
+if malware_hits:
+    with st.expander(f"⚠️ Known Malware Port Hits ({len(malware_hits)})", expanded=True):
+        for hit in malware_hits:
+            st.markdown(
+                f"🔴 **{hit['malware_family']}** — port `{hit['dst_port']}` "
+                f"(`{hit['src']}` → `{hit['dst']}`)\n\n"
+                f"*{hit['description']}*"
+            )
+
+# ── Suspicious Downloads ──────────────────────────────────────────────────────
+suspicious_dl = features.get("suspicious_downloads", [])
+if suspicious_dl:
+    with st.expander(f"⚠️ Suspicious Downloads ({len(suspicious_dl)})", expanded=True):
+        for dl in suspicious_dl:
+            st.markdown(
+                f"🔴 `{dl.get('extension', '?')}` file via HTTP — "
+                f"`{dl.get('request_line', '')}` | host: `{dl.get('host', '')}`"
+            )
+
 # ── Host Identity (MAC, Hostname, Windows Users) ──────────────────────────────
 host_details = features.get("host_details", [])
 windows_users = features.get("windows_users", [])
 
-if host_details or windows_users:
+ldap_users = features.get("ldap_users", [])
+
+if host_details or windows_users or ldap_users:
     with st.expander("Host Identity (MAC, Hostname, Windows Users)", expanded=True):
         if host_details:
             for host in host_details:
@@ -232,6 +255,17 @@ if host_details or windows_users:
                 st.markdown(" | ".join(parts))
         if windows_users:
             st.markdown(f"**Windows user account(s):** {', '.join(f'`{u}`' for u in windows_users)}")
+        if ldap_users:
+            for lu in ldap_users:
+                display = lu.get("display_name") or lu.get("common_name") or ""
+                sam = lu.get("sam_account_name") or ""
+                given = lu.get("given_name") or ""
+                sn = lu.get("surname") or ""
+                full = display or (f"{given} {sn}".strip()) or sam
+                st.markdown(
+                    f"**LDAP full name:** `{full}`"
+                    + (f" | sAMAccountName: `{sam}`" if sam else "")
+                )
 
 left, right = st.columns(2)
 

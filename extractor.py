@@ -5,13 +5,47 @@ The LLM never receives raw packet bytes -- only derived metadata.
 
 Extracted fields:
   - Protocol distribution, connection summaries, top talkers
-  - DNS queries, HTTP requests, TLS SNI
+  - DNS queries, HTTP requests (with suspicious download flagging), TLS SNI
   - Payload entropy, packet size stats, TCP flags, ICMP
   - Host details: MAC address (Ethernet), hostname (NBNS), Windows user (Kerberos)
+  - Full name (LDAP givenName / sn)
+  - Known malware C2 port hits
 """
 import math
 import collections
 from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Known malware C2 ports
+# ---------------------------------------------------------------------------
+
+KNOWN_MALWARE_PORTS: dict[int, tuple[str, str]] = {
+    12132: ("STRRAT",                   "Default C2 port for STRRAT Java RAT"),
+    1177:  ("njRAT/Bladabindi",         "Common njRAT C2 port"),
+    5552:  ("AsyncRAT",                 "Default AsyncRAT C2 port"),
+    6606:  ("AsyncRAT",                 "AsyncRAT alternative C2 port"),
+    7707:  ("AsyncRAT",                 "AsyncRAT alternative C2 port"),
+    8808:  ("AsyncRAT",                 "AsyncRAT alternative C2 port"),
+    4444:  ("Metasploit/Meterpreter",   "Default Metasploit reverse shell port"),
+    1604:  ("DarkComet RAT",            "Default DarkComet RAT C2 port"),
+    9999:  ("QuasarRAT/Various",        "Common RAT C2 port"),
+    3460:  ("XWorm",                    "XWorm default C2 port"),
+    4782:  ("QuasarRAT",                "QuasarRAT default C2 port"),
+    1500:  ("XenoRAT",                  "XenoRAT default C2 port"),
+    6655:  ("NjRAT",                    "NjRAT alternative port"),
+    8848:  ("Gh0stRAT",                 "Gh0stRAT C2 port"),
+}
+
+# ---------------------------------------------------------------------------
+# Suspicious file extensions for download detection
+# ---------------------------------------------------------------------------
+
+SUSPICIOUS_EXTENSIONS: frozenset[str] = frozenset({
+    ".jar", ".exe", ".dll", ".ps1", ".vbs", ".bat", ".cmd",
+    ".hta", ".jse", ".wsf", ".scr", ".pif", ".msi", ".cab",
+    ".iso", ".img", ".lnk", ".reg",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -32,52 +66,35 @@ def _calc_entropy(data: bytes) -> float:
 # ---------------------------------------------------------------------------
 
 def _extract_sni(payload: bytes) -> str | None:
-    """
-    Parse TLS SNI extension from a raw TCP payload containing a TLS ClientHello.
-    Returns the SNI hostname string, or None if not found.
-    """
+    """Parse TLS SNI from a raw TCP payload containing a TLS ClientHello."""
     try:
-        # TLS record header: content_type=22 (Handshake), version (2), length (2)
         if len(payload) < 5 or payload[0] != 0x16:
             return None
-        # Handshake header starts at byte 5: type=1 (ClientHello)
         if payload[5] != 0x01:
             return None
-
-        # Skip: record header (5) + handshake header (4) + client_version (2) + random (32)
         offset = 5 + 4 + 2 + 32
         if len(payload) <= offset:
             return None
-
-        # Session ID
         session_id_len = payload[offset]
         offset += 1 + session_id_len
         if len(payload) <= offset + 2:
             return None
-
-        # Cipher suites
         cs_len = int.from_bytes(payload[offset : offset + 2], "big")
         offset += 2 + cs_len
         if len(payload) <= offset:
             return None
-
-        # Compression methods
         comp_len = payload[offset]
         offset += 1 + comp_len
         if len(payload) <= offset + 2:
             return None
-
-        # Extensions block
         ext_block_len = int.from_bytes(payload[offset : offset + 2], "big")
         offset += 2
         end = offset + ext_block_len
-
         while offset + 4 <= end and offset + 4 <= len(payload):
             ext_type = int.from_bytes(payload[offset : offset + 2], "big")
             ext_data_len = int.from_bytes(payload[offset + 2 : offset + 4], "big")
             offset += 4
-            if ext_type == 0:  # server_name extension
-                # server_name_list_length (2), name_type (1), name_length (2), name
+            if ext_type == 0:
                 if offset + 5 <= len(payload):
                     name_len = int.from_bytes(payload[offset + 3 : offset + 5], "big")
                     if offset + 5 + name_len <= len(payload):
@@ -94,11 +111,17 @@ def _extract_sni(payload: bytes) -> str | None:
 # HTTP
 # ---------------------------------------------------------------------------
 
+def _get_suspicious_extension(path: str) -> str:
+    """Return the file extension if the HTTP path ends in a suspicious one, else ''."""
+    clean = path.lower().split("?")[0].split("#")[0]
+    for ext in SUSPICIOUS_EXTENSIONS:
+        if clean.endswith(ext):
+            return ext
+    return ""
+
+
 def _parse_http_request(payload: bytes, src: str, dst: str) -> dict | None:
-    """
-    Attempt to parse an HTTP/1.x request from raw TCP payload bytes.
-    Returns a dict of key fields or None if not an HTTP request.
-    """
+    """Parse an HTTP/1.x request from raw TCP payload bytes."""
     http_methods = (
         b"GET ", b"POST ", b"PUT ", b"DELETE ",
         b"HEAD ", b"OPTIONS ", b"PATCH ", b"CONNECT ",
@@ -114,12 +137,19 @@ def _parse_http_request(payload: bytes, src: str, dst: str) -> dict | None:
             if ": " in line:
                 k, v = line.split(": ", 1)
                 headers[k.lower()] = v
+
+        # Extract path for extension check
+        parts = request_line.split(" ")
+        path = parts[1] if len(parts) >= 2 else ""
+        suspicious_ext = _get_suspicious_extension(path)
+
         return {
             "request_line": request_line,
             "host": headers.get("host", ""),
             "user_agent": headers.get("user-agent", ""),
             "content_type": headers.get("content-type", ""),
             "authorization": "present" if "authorization" in headers else "",
+            "suspicious_download": suspicious_ext if suspicious_ext else None,
             "src": src,
             "dst": dst,
         }
@@ -128,25 +158,18 @@ def _parse_http_request(payload: bytes, src: str, dst: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# NBNS -- Windows hostname extraction
+# NBNS -- Windows hostname
 # ---------------------------------------------------------------------------
 
 def _decode_nbns_name(encoded: bytes) -> str | None:
-    """
-    Decode a NetBIOS-encoded name (32 encoded bytes -> up to 15 plain chars).
-
-    NetBIOS encodes each byte as two uppercase letters:
-      high nibble -> chr(high + 0x41)
-      low  nibble -> chr(low  + 0x41)
-    Padding byte is 0x20 (space), encoded as 'CA'.
-    """
+    """Decode a 32-byte NetBIOS-encoded name into a plain hostname string."""
     try:
         if len(encoded) < 30:
             return None
         name = ""
-        for i in range(0, 30, 2):   # 15 character positions (last pair is type byte)
+        for i in range(0, 30, 2):
             b = ((encoded[i] - 0x41) << 4) | (encoded[i + 1] - 0x41)
-            if b == 0x20:           # padding -- name is finished
+            if b == 0x20:
                 break
             if 0x20 <= b <= 0x7E:
                 name += chr(b)
@@ -156,61 +179,34 @@ def _decode_nbns_name(encoded: bytes) -> str | None:
 
 
 def _extract_nbns_hostname(payload: bytes) -> str | None:
-    """
-    Extract the NetBIOS hostname from an NBNS (UDP port 137) packet payload.
-
-    NBNS header layout (12 bytes):
-      TxID (2), Flags (2), QDCount (2), ANCount (2), NSCount (2), ARCount (2)
-    Question section immediately follows:
-      Length byte (must be 0x20 = 32), 32 encoded bytes, null terminator (0x00)
-    """
+    """Extract hostname from NBNS (UDP port 137) packet payload."""
     try:
-        if len(payload) < 47:
+        if len(payload) < 47 or payload[12] != 0x20:
             return None
-        if payload[12] != 0x20:     # expected name length byte
-            return None
-        encoded = payload[13:45]    # 32 encoded bytes
-        return _decode_nbns_name(encoded)
+        return _decode_nbns_name(payload[13:45])
     except Exception:
         return None
 
 
 # ---------------------------------------------------------------------------
-# Kerberos -- Windows user account extraction
+# Kerberos -- Windows user account
 # ---------------------------------------------------------------------------
 
 def _extract_kerberos_cname(payload: bytes, is_tcp: bool = False) -> str | None:
-    """
-    Extract the CNameString (Windows user account) from a Kerberos AS-REQ packet.
-
-    Kerberos AS-REQ application tag: 0x6a
-    The CNameString is encoded as an ASN.1 GeneralString (tag 0x1b).
-    For TCP Kerberos, the first 4 bytes are a record-length prefix to skip.
-
-    Strategy: scan for GeneralString tags and return the first short ASCII
-    string that looks like a username (excludes known service names).
-    """
+    """Extract CNameString from a Kerberos AS-REQ packet (TCP/UDP port 88)."""
     EXCLUDED = frozenset({"krbtgt", "kerberos", "kadmin", "changepw"})
-
     try:
-        data = payload[4:] if is_tcp else payload   # strip TCP length prefix
-
-        # Must start with AS-REQ application tag
+        data = payload[4:] if is_tcp else payload
         if not data or data[0] != 0x6A:
             return None
-
-        # Scan for GeneralString (0x1b) tags
         i = 0
         while i < len(data) - 2:
-            if data[i] == 0x1B:                     # ASN.1 GeneralString tag
+            if data[i] == 0x1B:
                 length = data[i + 1]
                 if 1 <= length <= 64 and i + 2 + length <= len(data):
                     try:
                         candidate = data[i + 2 : i + 2 + length].decode("ascii")
-                        # Accept alphanumeric names with common separators
-                        if candidate and all(
-                            c.isalnum() or c in "._-$@" for c in candidate
-                        ):
+                        if candidate and all(c.isalnum() or c in "._-$@" for c in candidate):
                             if candidate.lower() not in EXCLUDED:
                                 return candidate
                     except (UnicodeDecodeError, ValueError):
@@ -219,6 +215,68 @@ def _extract_kerberos_cname(payload: bytes, is_tcp: bool = False) -> str | None:
     except Exception:
         pass
     return None
+
+
+# ---------------------------------------------------------------------------
+# LDAP -- full name (givenName / sn / displayName)
+# ---------------------------------------------------------------------------
+
+def _extract_ldap_attributes(payload: bytes) -> dict[str, str]:
+    """
+    Extract user attribute values from LDAP SearchResultEntry packets (TCP port 389).
+
+    LDAP SearchResultEntry has application tag 0x64.
+    Each attribute is encoded as:
+      OctetString (0x04) + length + <attr_name>
+      SET (0x31) + length + OctetString (0x04) + length + <value>
+
+    Strategy: find known attribute name byte strings, verify the OctetString
+    encoding prefix, then extract the value from the SET that follows.
+    """
+    # Only process packets that look like LDAP SearchResultEntry (tag 0x64)
+    if 0x64 not in payload[:32]:
+        return {}
+
+    ATTRS: dict[bytes, str] = {
+        b"givenName":      "given_name",
+        b"sn":             "surname",
+        b"displayName":    "display_name",
+        b"sAMAccountName": "sam_account_name",
+        b"cn":             "common_name",
+    }
+    results: dict[str, str] = {}
+
+    for attr_bytes, field_name in ATTRS.items():
+        if field_name in results:
+            continue
+        idx = 0
+        while True:
+            idx = payload.find(attr_bytes, idx)
+            if idx == -1:
+                break
+            # Verify OctetString encoding: 0x04 <len> precedes the attribute name
+            if (idx >= 2
+                    and payload[idx - 1] == len(attr_bytes)
+                    and payload[idx - 2] == 0x04):
+                after = idx + len(attr_bytes)
+                # Scan forward up to 10 bytes for SET tag (0x31)
+                for j in range(after, min(after + 10, len(payload) - 3)):
+                    if payload[j] == 0x31:          # SET OF values
+                        k = j + 2                   # skip SET tag + length byte
+                        if k < len(payload) - 1 and payload[k] == 0x04:
+                            val_len = payload[k + 1]
+                            end = k + 2 + val_len
+                            if 0 < val_len <= 128 and end <= len(payload):
+                                try:
+                                    s = payload[k + 2 : end].decode("utf-8", errors="ignore").strip()
+                                    if s and all(0x20 <= ord(c) or ord(c) > 0x7F for c in s):
+                                        results[field_name] = s
+                                except Exception:
+                                    pass
+                        break
+            idx += 1
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -245,10 +303,17 @@ def extract_features(pcap_path: str) -> dict[str, Any]:
     tcp_flag_counts: collections.Counter = collections.Counter()
     icmp_type_counts: collections.Counter = collections.Counter()
 
-    # Host identity tracking
-    ip_to_mac: dict[str, str] = {}          # IP -> MAC address (from Ethernet layer)
-    ip_to_hostnames: dict[str, set] = collections.defaultdict(set)   # IP -> NBNS hostnames
-    kerberos_users: set[str] = set()        # Windows user accounts from Kerberos AS-REQ
+    # Host identity
+    ip_to_mac: dict[str, str] = {}
+    ip_to_hostnames: dict[str, set] = collections.defaultdict(set)
+    kerberos_users: set[str] = set()
+
+    # LDAP user attributes
+    ldap_users: list[dict] = []
+    ldap_seen: set[str] = set()          # deduplicate by sAMAccountName / common_name
+
+    # Known malware port tracking: port -> list of connection strings
+    malware_port_hits: dict[int, list[str]] = collections.defaultdict(list)
 
     for pkt in packets:
         pkt_len = len(pkt)
@@ -267,7 +332,6 @@ def extract_features(pcap_path: str) -> dict[str, Any]:
         ip_counts[src_ip] += 1
         ip_counts[dst_ip] += 1
 
-        # MAC address: capture source MAC from Ethernet layer for each new IP
         if pkt.haslayer("Ether") and src_ip not in ip_to_mac:
             ip_to_mac[src_ip] = pkt["Ether"].src
 
@@ -279,16 +343,20 @@ def extract_features(pcap_path: str) -> dict[str, Any]:
             tcp_flag_counts[str(pkt["TCP"].flags)] += 1
             conn_counts[(src_ip, sport, dst_ip, dport, "TCP")] += 1
 
+            # Known malware port check (destination port only to avoid noise)
+            if dport in KNOWN_MALWARE_PORTS:
+                conn_str = f"{src_ip}:{sport} -> {dst_ip}:{dport}"
+                if conn_str not in malware_port_hits[dport]:
+                    malware_port_hits[dport].append(conn_str)
+
             if pkt.haslayer("Raw"):
                 raw: bytes = bytes(pkt["Raw"].load)
                 all_payload_bytes.extend(raw)
 
-                # HTTP
                 req = _parse_http_request(raw, f"{src_ip}:{sport}", f"{dst_ip}:{dport}")
                 if req:
                     http_requests.append(req)
 
-                # TLS SNI
                 sni = _extract_sni(raw)
                 if sni:
                     sni_set.add(sni)
@@ -298,6 +366,15 @@ def extract_features(pcap_path: str) -> dict[str, Any]:
                     cname = _extract_kerberos_cname(raw, is_tcp=True)
                     if cname:
                         kerberos_users.add(cname)
+
+                # LDAP (port 389)
+                if sport == 389 or dport == 389:
+                    attrs = _extract_ldap_attributes(raw)
+                    if attrs:
+                        dedup_key = attrs.get("sam_account_name") or attrs.get("common_name", "")
+                        if dedup_key and dedup_key not in ldap_seen:
+                            ldap_seen.add(dedup_key)
+                            ldap_users.append(attrs)
 
         # ---- UDP ----
         elif pkt.haslayer("UDP"):
@@ -310,13 +387,11 @@ def extract_features(pcap_path: str) -> dict[str, Any]:
                 raw = bytes(pkt["Raw"].load)
                 all_payload_bytes.extend(raw)
 
-                # NBNS hostname (UDP port 137)
                 if sport == 137:
                     hostname = _extract_nbns_hostname(raw)
                     if hostname:
                         ip_to_hostnames[src_ip].add(hostname)
 
-                # Kerberos over UDP (port 88)
                 if sport == 88 or dport == 88:
                     cname = _extract_kerberos_cname(raw, is_tcp=False)
                     if cname:
@@ -330,7 +405,7 @@ def extract_features(pcap_path: str) -> dict[str, Any]:
         else:
             proto_counts[f"IP_proto_{ip_proto}"] += 1
 
-        # DNS (can sit on top of UDP or TCP)
+        # DNS
         if pkt.haslayer("DNS"):
             dns = pkt["DNS"]
             if dns.qr == 0 and dns.qdcount > 0:
@@ -343,7 +418,6 @@ def extract_features(pcap_path: str) -> dict[str, Any]:
 
     # ---- Aggregate ----
 
-    # Top connections by packet count (cap at 20)
     top_connections = [
         {
             "src": f"{k[0]}:{k[1]}",
@@ -354,7 +428,6 @@ def extract_features(pcap_path: str) -> dict[str, Any]:
         for k, v in sorted(conn_counts.items(), key=lambda x: x[1], reverse=True)[:20]
     ]
 
-    # Packet size statistics
     pkt_stats: dict = {}
     if sizes:
         pkt_stats = {
@@ -365,7 +438,6 @@ def extract_features(pcap_path: str) -> dict[str, Any]:
             "packet_count": len(sizes),
         }
 
-    # Payload entropy
     entropy_info: dict = {}
     if all_payload_bytes:
         entropy_val = _calc_entropy(bytes(all_payload_bytes))
@@ -377,21 +449,16 @@ def extract_features(pcap_path: str) -> dict[str, Any]:
             ),
         }
 
-    # ICMP type names
     icmp_type_names = {
-        0: "Echo Reply",
-        3: "Destination Unreachable",
-        8: "Echo Request",
-        11: "Time Exceeded",
-        5: "Redirect",
+        0: "Echo Reply", 3: "Destination Unreachable",
+        8: "Echo Request", 11: "Time Exceeded", 5: "Redirect",
     }
     icmp_summary = {
         icmp_type_names.get(t, f"type_{t}"): count
         for t, count in icmp_type_counts.items()
     }
 
-    # Host details: merge MAC, NBNS hostnames, and Kerberos users per IP
-    # Build a combined view keyed by IP
+    # Host details
     all_ips = set(ip_to_mac) | set(ip_to_hostnames)
     host_details = []
     for ip in sorted(all_ips):
@@ -403,8 +470,28 @@ def extract_features(pcap_path: str) -> dict[str, Any]:
             entry["hostnames"] = hostnames
         host_details.append(entry)
 
-    # Attach Kerberos users at the top level (not always mappable to a single IP)
-    windows_users = sorted(kerberos_users)
+    # Known malware port hits
+    known_malware_port_hits = []
+    for port, conns in malware_port_hits.items():
+        family, description = KNOWN_MALWARE_PORTS[port]
+        known_malware_port_hits.append({
+            "port": port,
+            "malware_family": family,
+            "description": description,
+            "connections": conns[:10],
+        })
+
+    # Suspicious downloads from HTTP requests
+    suspicious_downloads = [
+        {
+            "request_line": r["request_line"],
+            "host": r["host"],
+            "extension": r["suspicious_download"],
+            "src": r["src"],
+        }
+        for r in http_requests
+        if r.get("suspicious_download")
+    ]
 
     return {
         "total_packets": len(packets),
@@ -419,5 +506,8 @@ def extract_features(pcap_path: str) -> dict[str, Any]:
         "tcp_flags_summary": dict(tcp_flag_counts.most_common(10)),
         "icmp_summary": icmp_summary,
         "host_details": host_details,
-        "windows_users": windows_users,
+        "windows_users": sorted(kerberos_users),
+        "ldap_users": ldap_users,
+        "known_malware_port_hits": known_malware_port_hits,
+        "suspicious_downloads": suspicious_downloads,
     }
