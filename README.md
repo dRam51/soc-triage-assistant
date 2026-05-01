@@ -272,7 +272,7 @@ The model is instructed to respond with `insufficient_data=true` when:
 
 ## Evaluation: SOC Triage Assistant vs. Human Analyst
 
-All three test cases use real-world traffic analysis exercises from [malware-traffic-analysis.net](https://www.malware-traffic-analysis.net). The answers files represent the human analyst baseline: what an experienced analyst finds by manually working through the pcap in Wireshark. The SOC Triage Assistant output represents the GenAI approach.
+Both test cases use real-world traffic analysis exercises from [malware-traffic-analysis.net](https://www.malware-traffic-analysis.net). The answers files represent the human analyst baseline: what an experienced analyst finds by manually working through the pcap in Wireshark. The SOC Triage Assistant output represents the GenAI approach.
 
 ---
 
@@ -349,13 +349,13 @@ The exercise asked the analyst to identify the victim machine. The assistant wen
 
 ---
 
-### Where the assistant fell short
+### Gap analysis
 
-One finding remains beyond what pcap metadata can provide:
+| Gap | Human Analyst | SOC Triage Assistant | Root Cause | Addressable? |
+|---|---|---|---|---|
+| Full user name (Becka Rolf) | Found via Wireshark Find Packet on display name string | Not extracted | Full display name not transmitted in any pcap-observable protocol — it exists only in Active Directory, not in NBNS/Kerberos frames | No — requires AD directory data or endpoint telemetry |
 
-- **Full user name (Becka Rolf):** The full display name is not transmitted in any pcap-observable protocol. The human analyst derives it by searching packet details for a string matching the Kerberos account name pattern -- a lookup that ultimately depends on directory data (Active Directory) not present in the capture.
-
-The three victim-attribution fields previously missing (hostname, MAC, user account) are now extracted automatically -- see the updated comparison table above.
+No other gaps were identified for this test case. The three victim-attribution fields (hostname, MAC, user account) are all extracted automatically; the C2 server, malware family, and risk rating were all correct.
 
 ---
 
