@@ -272,7 +272,7 @@ The model is instructed to respond with `insufficient_data=true` when:
 
 ## Evaluation: SOC Triage Assistant vs. Human Analyst
 
-Both test cases use real-world traffic analysis exercises from [malware-traffic-analysis.net](https://www.malware-traffic-analysis.net). The answers files represent the human analyst baseline: what an experienced analyst finds by manually working through the pcap in Wireshark. The SOC Triage Assistant output represents the GenAI approach.
+All three test cases use real-world traffic analysis exercises from [malware-traffic-analysis.net](https://www.malware-traffic-analysis.net). The answers files represent the human analyst baseline: what an experienced analyst finds by manually working through the pcap in Wireshark. The SOC Triage Assistant output represents the GenAI approach.
 
 ---
 
@@ -380,25 +380,34 @@ The assistant correctly identified the core threat, all victim-attribution field
 
 ---
 
-## Test Case 2: STRRAT (2024-07-30)
+## Test Case 3: STRRAT (2024-07-30)
 
 **Pcap:** `2024-07-30-traffic-analysis-exercise.pcap` (11.5 MB, 11,562 packets)
 **Threat:** STRRAT Java-based RAT delivered via email attachment
+**Domain:** `wiresharkworkshop.online` | **DC:** `172.16.1.4 (WIRESHARK-WS-DC)`
 
 ---
 
 ### What the human analyst does (baseline)
 
-The human analyst uses a compound Wireshark filter to surface the non-standard port traffic:
+The analyst writes an incident report by manually applying two Wireshark filters:
 
+**Filter 1 — surface C2 and suspicious traffic from background noise:**
 ```
 (http.request or tls.handshake.type eq 1 or
  (tcp.flags.syn eq 1 and tcp.flags.ack eq 0 and
   !(ip.dst eq 172.16.1.0/24 or tcp.port eq 443 or tcp.port eq 80)))
 and !(ssdp)
 ```
+This isolates the initial SYN to `141.98.10.69:12132` and the `ip-api.com` lookup from legitimate Windows/Microsoft background traffic.
 
-This isolates the initial SYN to `141.98.10.79:12132` and the `ip-api.com` lookup from the noise of legitimate Windows and Microsoft traffic. The analyst then applies `ldap.AttributeDescription == "givenName"` to surface the victim's full name from LDAP traffic.
+**Filter 2 — victim full name from LDAP:**
+```
+ldap.AttributeDescription == "givenName"
+```
+This surfaces a `SearchResultEntry` frame containing the victim's first and last name from Active Directory LDAP traffic.
+
+Identifying STRRAT requires recognising that port 12132 is the default STRRAT C2 port and confirming via Follow TCP Stream, which shows the characteristic `STRRAT` string in `ping` lines. The infection vector (`PL#40704.jar`) is recovered by exporting objects from the pcap.
 
 ---
 
@@ -408,87 +417,108 @@ This isolates the initial SYN to `141.98.10.79:12132` and the `ip-api.com` looku
 |---|---|---|
 | Infected host IP | 172.16.1.66 | 172.16.1.66 |
 | C2 server | 141.98.10.69:12132 | 141.98.10.79:12132 (see note) |
-| Malware family | STRRAT | STRRAT (port 12132 signature match) |
-| C2 traffic on port 12132 | Flagged as STRRAT IOC | Flagged as High -- named STRRAT via malware port table |
+| Malware family | STRRAT | Not identified by name |
+| C2 port 12132 flagged | Yes, as STRRAT IOC | Yes, as High (unnamed C2) |
 | ip-api.com geolocation lookup | Listed as IOC | Flagged as Medium |
-| Suspicious User-Agent (Chrome 73) | Not flagged | Flagged as Medium |
-| github.com / objects.githubusercontent.com / repo1.maven.org | Listed as file-sharing IOCs | Flagged as High co-occurrence IOC alongside confirmed C2 |
-| Infection vector (Java JAR via email) | PL#40704.jar identified | Flagged if JAR download visible in HTTP metadata |
-| Risk rating | Escalate (implied) | High, Confidence: High |
-| Windows hostname | DESKTOP-SKBR25F | DESKTOP-SKBR25F (from NBNS) |
+| Chrome 73 User-Agent | Not flagged by human | Flagged as Medium (hardcoded toolkit UA) |
+| github.com / objects.githubusercontent.com / repo1.maven.org | Listed as file-sharing IOCs | Not flagged — treated as legitimate CDN/dev infrastructure |
+| Infection vector | `PL#40704.jar` via email | Not identified |
+| Overall risk rating | Escalate (implied High) | Medium, Confidence: Medium |
+| Windows hostname | DESKTOP-SKBR25F | DESKTOP-SKBR25F (NBNS, UDP port 137) |
 | MAC address | 00:1e:64:ec:f3:08 | Extracted from Ethernet layer |
-| Windows user account | ccollier | Extracted via Kerberos AS-REQ |
-| Full name | Clark Collier | Extracted via LDAP SearchResultEntry (givenName/sn) |
+| Windows user account | ccollier | Extracted via Kerberos AS-REQ CNameString |
+| Full name | Clark Collier | Not extracted — LDAP not parsed |
 
-> **Note on IP discrepancy:** The answer key lists `141.98.10.69` while the assistant extracted `141.98.10.79` directly from the pcap. The one-digit difference (.69 vs .79) is likely a typo in the answer key -- the extracted value is based on actual packet data.
+> **Note on IP discrepancy:** The answer key lists `141.98.10.69`; the assistant extracted `141.98.10.79` directly from packet data. The one-digit difference (.69 vs .79) is likely a transcription error in the answer key.
 
 ---
 
 ### Indicator accuracy
 
-The assistant flagged 5 indicators. All 5 were grounded in extracted features -- no hallucinations.
+The assistant flagged 5 indicators. All 5 were grounded in extracted features with zero hallucinations.
 
-| Indicator | Severity | Grounded in extracted data | Correct |
+| Indicator | Severity rated | Evidence in extracted features | Correct |
 |---|---|---|---|
-| TCP connection to 141.98.10.79 on non-standard port 12132 | High | 411 bidirectional packets confirmed | Yes |
-| IP geolocation lookup via ip-api.com | Medium | HTTP GET /json/ to ip-api.com confirmed | Yes |
-| Outdated/suspicious User-Agent (Chrome 73) | Medium | UA string present in extracted HTTP request | Yes |
+| TCP connection to 141.98.10.79 on non-standard port 12132 | High | 411 bidirectional packets (206 out, 205 in) confirmed | Yes |
+| IP geolocation lookup via ip-api.com | Medium | HTTP GET /json/ to ip-api.com (208.95.112.1:80) confirmed | Yes |
+| Outdated/suspicious User-Agent (Chrome 73) | Medium | UA string in extracted HTTP request confirmed | Yes |
 | SMB traffic to domain controller 172.16.1.4:445 | Low | 376 packets across two sessions confirmed | Yes |
-| Very high payload entropy (7.9988) | Low | Entropy value present in extracted features | Yes |
+| Very high payload entropy (7.9988) | Low | Entropy value in extracted features confirmed | Yes |
 
-**Hallucination rate: 0%** - All 5 indicators traceable to specific extracted values.
+**Hallucination rate: 0%** — all 5 indicators traceable to specific values in the extracted features panel.
 
 ---
 
 ### Where the assistant added value beyond the exercise
 
-- **Correlated attack stages:** Identified that the ip-api.com geolocation lookup likely preceded the C2 connection as a staged execution pattern -- not noted in the answer key
-- **Chrome 73 UA analysis:** Correctly interpreted the outdated UA as a hardcoded toolkit string rather than a real browser -- not flagged by the human answer
-- **Specific next steps:** Produced 7 actionable steps including blocking the C2 IP, checking GitHub downloads for payload delivery, and correlating geo-lookup timing
+Despite missing the malware name, the assistant produced genuine analytic value:
+
+- **Staged execution correlation:** Noted that the ip-api.com geolocation lookup likely preceded the C2 connection, suggesting a staged execution chain — not noted in the answer key
+- **Chrome 73 UA as toolkit indicator:** Correctly identified the outdated User-Agent as a hardcoded RAT string rather than a real browser — not flagged by the human answer
+- **Actionable next steps:** Generated 7 specific steps including blocking `141.98.10.79`, correlating the ip-api.com timestamp with the C2 SYN, checking GitHub/githubusercontent for payload staging, and reviewing SMB sessions to the domain controller
+- **Victim attribution:** Automatically extracted hostname (NBNS), MAC (Ethernet), and user account (Kerberos) — three fields the human analyst needs separate Wireshark filters to find
 
 ---
 
-### Where the assistant added value beyond the exercise (post-improvements)
+### Gap analysis
 
-- **STRRAT named automatically:** The malware port signature table matches port 12132 to STRRAT -- the report now names the family directly without any manual TCP stream inspection.
-- **Repo IOCs flagged in context:** When software-repository domains (github.com, objects.githubusercontent.com, repo1.maven.org) appear alongside confirmed STRRAT C2 traffic, the assistant now flags them as a High indicator for malware delivery via software repository infrastructure.
-- **Risk correctly rated High:** The malware port hit rule forces overall_risk=High regardless of other indicators, matching the human analyst's escalation decision.
-- **Clark Collier's full name extracted:** LDAP SearchResultEntry parsing recovers givenName and sn from port 389 frames, so the victim's full name now appears in the triage summary alongside their account name and hostname.
+Comparing the assistant's output to the human analyst baseline reveals four meaningful gaps:
 
-### Remaining limitations
+| Gap | Human Analyst | SOC Triage Assistant | Root Cause |
+|---|---|---|---|
+| Malware family identification | STRRAT | Unknown C2 on port 12132 | No port-to-malware signature table |
+| Risk rating | Escalate (High) | Medium/Medium | No rule to escalate non-standard C2 to High |
+| File-sharing IOCs | github.com, objects.githubusercontent.com, repo1.maven.org flagged | Not flagged | Context-blindness: repos treated as always-legitimate |
+| Victim full name | Clark Collier | Not extracted | LDAP SearchResultEntry (port 389) not parsed |
 
-- **Infection vector not identified:** The Java JAR email attachment (`PL#40704.jar`) cannot be recovered from network metadata alone -- it would require email/file extraction from the pcap or endpoint telemetry. If the JAR appears in an HTTP request path, `suspicious_downloads` will flag it.
-- **TCP stream content:** STRRAT-specific protocol strings (visible in Wireshark's Follow TCP Stream) are not available from metadata alone -- the tool correctly relies on port signatures rather than payload inspection.
+One gap is outside pcap metadata scope entirely:
+
+| Gap | Root Cause | Addressable? |
+|---|---|---|
+| Infection vector (`PL#40704.jar` email attachment) | Delivered via email, not visible as HTTP download in capture | No — requires email server logs or endpoint telemetry |
 
 ---
 
-### Test Case 2 verdict
+### Improvements implemented
 
-After the gap-driven improvements, the assistant correctly identifies STRRAT by name via the malware port table, rates the traffic High, flags software-repository co-occurrence as an IOC, and extracts Clark Collier's full name from LDAP -- matching the human analyst's findings on all fields available in network metadata. Hallucination rate remains 0%.
+Each gap above drove a specific code change:
+
+| Gap | Fix |
+|---|---|
+| STRRAT not named | Added `KNOWN_MALWARE_PORTS` table in `extractor.py` — port 12132 maps to STRRAT. New `known_malware_port_hits` field surfaces the family name. |
+| Risk under-rated | Added automatic High rule in `analyzer.py` system prompt: any `known_malware_port_hits` entry forces `overall_risk=High`. |
+| Repo IOCs missed | Added co-occurrence rule in system prompt: software-repo domains (github.com, objects.githubusercontent.com, repo1.maven.org, pypi.org, repo1.maven.org) flagged as High when appearing alongside confirmed non-standard port C2. |
+| Full name missing | Added `_extract_ldap_attributes()` in `extractor.py` — parses LDAP SearchResultEntry (TCP port 389, tag 0x64) for givenName, sn, displayName, sAMAccountName. New `ldap_users` field exposes this in the UI and report. |
+
+---
+
+### Test Case 3 verdict
+
+The assistant correctly identified the suspicious C2 channel, geolocation check, and all three victim-attribution fields extractable from network metadata — with zero hallucinations across all 5 indicators. The primary gaps were malware family identification, risk calibration, context-sensitive repo flagging, and LDAP full-name extraction. All four were addressed in the subsequent code improvements. The infection vector (email attachment) remains the one ceiling the tool cannot reach from pcap metadata alone.
 
 ---
 
 ## Cross-Test Summary
 
-| Dimension | Test Case 1 (NetSupport RAT) | Test Case 2 (STRRAT) |
-|---|---|---|
-| Malware identified by name | Yes | Yes (port 12132 signature) |
-| C2 server correctly flagged | Yes | Yes |
-| Risk rating accuracy | High/High (correct) | High/High (correct, after calibration) |
-| Victim IP | Correct | Correct |
-| Victim hostname | Correct (NBNS) | Correct (NBNS) |
-| Victim MAC | Correct (Ethernet) | Correct (Ethernet) |
-| Victim user account | Correct (Kerberos) | Correct (Kerberos) |
-| Full name | Not available (no LDAP in capture) | Correct (LDAP port 389 parsing) |
-| Software repo IOCs flagged | N/A | Yes (co-occurrence with C2) |
-| Suspicious downloads flagged | N/A | Yes (if JAR in HTTP path) |
-| Hallucinations | 0 of 7 indicators | 0 of 5 indicators |
-| Infection vector identified | N/A | Partial (HTTP delivery flagged; email attachment requires endpoint data) |
-| Added value beyond exercise | Yes (evasion, entropy, lateral movement) | Yes (malware named, repo IOCs, full name, High risk) |
+| Dimension | TC1: NetSupport RAT (2026-02-28) | TC3: STRRAT — pre-improvement | TC3: STRRAT — post-improvement |
+|---|---|---|---|
+| Malware identified by name | Yes (HTTP UA + URI pattern) | No | Yes (port 12132 signature table) |
+| C2 server correctly flagged | Yes | Yes | Yes |
+| Risk rating accuracy | High/High (correct) | Medium/Medium (under-rated) | High/High (malware port rule) |
+| Victim IP | Correct | Correct | Correct |
+| Victim hostname | Correct (NBNS) | Correct (NBNS) | Correct (NBNS) |
+| Victim MAC | Correct (Ethernet) | Correct (Ethernet) | Correct (Ethernet) |
+| Victim user account | Correct (Kerberos) | Correct (Kerberos) | Correct (Kerberos) |
+| Full name | Not available (no LDAP in TC1 capture) | Not extracted | Extracted via LDAP port 389 |
+| Software repo IOCs flagged | N/A | Not flagged | Flagged (co-occurrence with C2) |
+| Suspicious downloads flagged | N/A | Not flagged | Flagged if JAR in HTTP path |
+| Hallucinations | 0 of 7 indicators | 0 of 5 indicators | 0 (design) |
+| Infection vector | N/A (C2 was active) | Not identified (email attachment) | Not identified (email; out of scope) |
+| Value added beyond exercise | Evasion, entropy, lateral movement | UA analysis, staged execution chain | Malware named, repo IOCs, full name |
 
-**Overall hallucination rate across both test cases: 0 of 12 indicators (0%)**
+**Overall hallucination rate: 0 of 12 indicators (0%) across all evaluated runs**
 
-The assistant now covers the full identification chain for both test cases. Malware families using known port signatures are automatically named and rated High. Victim attribution is complete when NBNS, Kerberos, and LDAP traffic are present in the capture. The remaining ceiling is payload-level evidence (TCP stream content, email attachments) that is unavailable from network metadata alone.
+The progression across test cases tells a clear improvement story. Test Case 1 (NetSupport) worked well because the RAT used a distinctive HTTP User-Agent and URI. Test Case 3 (STRRAT) exposed four gaps — malware naming, risk calibration, context-sensitive repo flagging, and LDAP full-name extraction — each of which drove a specific code change. The one remaining ceiling across all test cases is payload-level evidence (TCP stream content, email attachments) that is structurally unavailable from network metadata alone.
 
 ---
 
