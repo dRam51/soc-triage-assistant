@@ -214,7 +214,24 @@ if mode == "🤖 AI-Augmented Analysis":
 # ── Raw Extracted Features (always shown) ─────────────────────────────────────
 
 st.subheader("Extracted Features")
-st.caption("Raw pcap metadata — use this to cross-reference AI findings.")
+st.caption("Raw pcap metadata - use this to cross-reference AI findings.")
+
+# ── Host Identity (MAC, Hostname, Windows Users) ──────────────────────────────
+host_details = features.get("host_details", [])
+windows_users = features.get("windows_users", [])
+
+if host_details or windows_users:
+    with st.expander("Host Identity (MAC, Hostname, Windows Users)", expanded=True):
+        if host_details:
+            for host in host_details:
+                parts = [f"`{host['ip']}`"]
+                if host.get("mac_address"):
+                    parts.append(f"MAC: `{host['mac_address']}`")
+                if host.get("hostnames"):
+                    parts.append(f"Hostname(s): **{', '.join(host['hostnames'])}**")
+                st.markdown(" | ".join(parts))
+        if windows_users:
+            st.markdown(f"**Windows user account(s):** {', '.join(f'`{u}`' for u in windows_users)}")
 
 left, right = st.columns(2)
 
