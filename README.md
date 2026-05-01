@@ -264,9 +264,14 @@ The model is instructed to respond with `insufficient_data=true` when:
 
 ## Evaluation: SOC Triage Assistant vs. Human Analyst
 
-This section compares the SOC Triage Assistant against a real-world traffic analysis exercise from [malware-traffic-analysis.net](https://www.malware-traffic-analysis.net/2026/02/28/index.html). The answers file represents the human analyst baseline: what an experienced analyst would find by manually working through the pcap in Wireshark. The SOC Triage Assistant output represents the GenAI approach.
+Both test cases use real-world traffic analysis exercises from [malware-traffic-analysis.net](https://www.malware-traffic-analysis.net). The answers files represent the human analyst baseline: what an experienced analyst finds by manually working through the pcap in Wireshark. The SOC Triage Assistant output represents the GenAI approach.
 
-**Test case:** `2026-02-28-traffic-analysis-exercise.pcap` (6.6 MB, 15,512 packets) — a live NetSupport Manager RAT infection with active C2 communication.
+---
+
+## Test Case 1: NetSupport Manager RAT (2026-02-28)
+
+**Pcap:** `2026-02-28-traffic-analysis-exercise.pcap` (6.6 MB, 15,512 packets)
+**Threat:** Active NetSupport Manager RAT infection with live C2 beaconing
 
 ---
 
@@ -353,21 +358,123 @@ The three victim-attribution fields previously missing (hostname, MAC, user acco
 | Open and load pcap | ~30 seconds | ~5 seconds (upload) |
 | Identify C2 traffic | Filter by IP, inspect manually (~5-10 min) | Automatic, in triage report |
 | Identify RAT family | Recognize User-Agent string (~2-5 min) | Named in traffic summary |
-| Find hostname | Apply `nbns` filter, inspect frame (~2 min) | Not available |
-| Find user account | Apply `kerberos.CNameString` filter (~3 min) | Not available |
-| Find full name | Use Find Packet, search string (~2 min) | Not available |
+| Find hostname | Apply `nbns` filter, inspect frame (~2 min) | Extracted via NBNS parsing |
+| Find user account | Apply `kerberos.CNameString` filter (~3 min) | Extracted via Kerberos AS-REQ |
+| Find full name | Use Find Packet, search string (~2 min) | Not available (requires AD) |
 | Write incident summary | Manual writeup (~15-30 min) | Auto-generated in structured format |
 | Determine disposition | Based on full analysis | Risk: High, Confidence: High in seconds |
 
-For the threat identification portion of triage, the assistant is significantly faster. For victim attribution (the specific focus of this exercise), the human analyst with Wireshark is more capable due to the current extractor's limitations.
+---
+
+### Test Case 1 verdict
+
+The assistant correctly identified the core threat, all victim-attribution fields except the full display name, and produced zero hallucinations. It surfaced additional context (evasion technique, lateral movement, entropy signal) beyond the exercise scope.
 
 ---
 
-### Overall assessment
+## Test Case 2: STRRAT (2024-07-30)
 
-The SOC Triage Assistant correctly identified the core threat (NetSupport Manager RAT, C2 server, infection confirmed) and recommended the correct disposition (Escalate) with zero hallucinations. It surfaced indicators and context that go beyond what the exercise answer key covers, including evasion techniques, lateral movement signals, and specific remediation steps.
+**Pcap:** `2024-07-30-traffic-analysis-exercise.pcap` (11.5 MB, 11,562 packets)
+**Threat:** STRRAT Java-based RAT delivered via email attachment
 
-The extractor now also surfaces victim-attribution data -- MAC address (Ethernet layer), Windows hostname (NBNS), and Windows user account (Kerberos AS-REQ) -- closing the previously identified gap. The only remaining finding exclusive to the human analyst is the full display name, which is not present in network traffic and requires Active Directory access to resolve.
+---
+
+### What the human analyst does (baseline)
+
+The human analyst uses a compound Wireshark filter to surface the non-standard port traffic:
+
+```
+(http.request or tls.handshake.type eq 1 or
+ (tcp.flags.syn eq 1 and tcp.flags.ack eq 0 and
+  !(ip.dst eq 172.16.1.0/24 or tcp.port eq 443 or tcp.port eq 80)))
+and !(ssdp)
+```
+
+This isolates the initial SYN to `141.98.10.79:12132` and the `ip-api.com` lookup from the noise of legitimate Windows and Microsoft traffic. The analyst then applies `ldap.AttributeDescription == "givenName"` to surface the victim's full name from LDAP traffic.
+
+---
+
+### What the SOC Triage Assistant found
+
+| Finding | Human Analyst | SOC Triage Assistant |
+|---|---|---|
+| Infected host IP | 172.16.1.66 | 172.16.1.66 |
+| C2 server | 141.98.10.69:12132 | 141.98.10.79:12132 (see note) |
+| Malware family | STRRAT | Not identified by name |
+| C2 traffic on port 12132 | Flagged as STRRAT IOC | Flagged as High (unknown C2) |
+| ip-api.com geolocation lookup | Listed as IOC | Flagged as Medium |
+| Suspicious User-Agent (Chrome 73) | Not flagged | Flagged as Medium |
+| github.com / objects.githubusercontent.com / repo1.maven.org | Listed as file-sharing IOCs | Not flagged (treated as legitimate) |
+| Infection vector (Java JAR via email) | PL#40704.jar identified | Not identified |
+| Risk rating | Escalate (implied) | Medium, Confidence: Medium |
+| Windows hostname | DESKTOP-SKBR25F | DESKTOP-SKBR25F (from NBNS) |
+| MAC address | 00:1e:64:ec:f3:08 | Extracted from Ethernet layer |
+| Windows user account | ccollier | Extracted via Kerberos AS-REQ |
+| Full name | Clark Collier | Not extractable (requires LDAP) |
+
+> **Note on IP discrepancy:** The answer key lists `141.98.10.69` while the assistant extracted `141.98.10.79` directly from the pcap. The one-digit difference (.69 vs .79) is likely a typo in the answer key -- the extracted value is based on actual packet data.
+
+---
+
+### Indicator accuracy
+
+The assistant flagged 5 indicators. All 5 were grounded in extracted features -- no hallucinations.
+
+| Indicator | Severity | Grounded in extracted data | Correct |
+|---|---|---|---|
+| TCP connection to 141.98.10.79 on non-standard port 12132 | High | 411 bidirectional packets confirmed | Yes |
+| IP geolocation lookup via ip-api.com | Medium | HTTP GET /json/ to ip-api.com confirmed | Yes |
+| Outdated/suspicious User-Agent (Chrome 73) | Medium | UA string present in extracted HTTP request | Yes |
+| SMB traffic to domain controller 172.16.1.4:445 | Low | 376 packets across two sessions confirmed | Yes |
+| Very high payload entropy (7.9988) | Low | Entropy value present in extracted features | Yes |
+
+**Hallucination rate: 0%** - All 5 indicators traceable to specific extracted values.
+
+---
+
+### Where the assistant added value beyond the exercise
+
+- **Correlated attack stages:** Identified that the ip-api.com geolocation lookup likely preceded the C2 connection as a staged execution pattern -- not noted in the answer key
+- **Chrome 73 UA analysis:** Correctly interpreted the outdated UA as a hardcoded toolkit string rather than a real browser -- not flagged by the human answer
+- **Specific next steps:** Produced 7 actionable steps including blocking the C2 IP, checking GitHub downloads for payload delivery, and correlating geo-lookup timing
+
+---
+
+### Where the assistant fell short
+
+- **STRRAT not named:** The assistant identified suspicious C2 traffic on port 12132 but did not name the malware family. The human analyst identified it as STRRAT because port 12132 is a known STRRAT indicator and the TCP stream contains STRRAT-specific strings (visible in Wireshark's Follow TCP Stream).
+- **GitHub/Maven IOCs missed:** `github.com`, `objects.githubusercontent.com`, and `repo1.maven.org` were treated as legitimate CDN/dev infrastructure. In this context they are file-sharing IOCs used to stage the Java payload -- but without payload inspection the AI correctly cannot confirm malicious use.
+- **Risk under-rated:** The assistant rated this Medium/Medium. Given an active C2 channel on a known malware port plus a geolocation check, the human analyst would rate this High. The lower confidence reflects appropriate uncertainty about the non-standard port, but the risk level should likely be higher.
+- **Infection vector not identified:** The Java JAR email attachment (`PL#40704.jar`) cannot be recovered from network metadata alone -- it would require file extraction from the pcap or endpoint telemetry.
+- **Full name not extractable:** Clark Collier's display name appears only in LDAP traffic (`ldap.AttributeDescription == "givenName"`), which is not currently parsed by the extractor.
+
+---
+
+### Test Case 2 verdict
+
+The assistant correctly identified the suspicious C2 channel, geolocation lookup, and all victim-attribution fields except the full name -- with zero hallucinations. The main gaps are malware family identification (STRRAT uses a known port signature not in the extractor's ruleset) and the three GitHub/Maven domains that are IOCs in context but indistinguishable from legitimate traffic without payload inspection.
+
+---
+
+## Cross-Test Summary
+
+| Dimension | Test Case 1 (NetSupport RAT) | Test Case 2 (STRRAT) |
+|---|---|---|
+| Malware identified by name | Yes | No |
+| C2 server correctly flagged | Yes | Yes |
+| Risk rating accuracy | High/High (correct) | Medium/Medium (under-rated) |
+| Victim IP | Correct | Correct |
+| Victim hostname | Correct (NBNS) | Correct (NBNS) |
+| Victim MAC | Correct (Ethernet) | Correct (Ethernet) |
+| Victim user account | Correct (Kerberos) | Correct (Kerberos) |
+| Full name | Not available | Not available |
+| Hallucinations | 0 of 7 indicators | 0 of 5 indicators |
+| Infection vector identified | N/A | No (JAR not visible in metadata) |
+| Added value beyond exercise | Yes (evasion, entropy, lateral movement) | Yes (UA analysis, staged execution) |
+
+**Overall hallucination rate across both test cases: 0 of 12 indicators (0%)**
+
+The assistant performs most reliably when malware uses cleartext or semi-structured C2 protocols with distinctive metadata (NetSupport's HTTP User-Agent and URI pattern). It struggles to name malware families that communicate over raw TCP with no protocol-level fingerprint visible in metadata. Risk under-rating is the primary calibration gap -- the model is appropriately conservative but may need a higher floor when an active non-standard port C2 channel is confirmed alongside a geolocation check.
 
 ---
 
