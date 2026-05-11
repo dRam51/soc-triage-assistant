@@ -1,6 +1,6 @@
 # SOC Triage Assistant
 
-LLM-augmented triage for flagged network packet captures. Upload a `.pcap`, get a structured AI triage report with risk rating and indicators, review raw features, and record your disposition — all in a browser UI.
+Triage assistant for flagged network packet captures. Upload a `.pcap`, get a structured AI triage report with risk rating and indicators, review raw features, and record your disposition — all in a browser UI.
 
 ---
 
